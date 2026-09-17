@@ -1,0 +1,19 @@
+[project]
+name = "deepteam-project"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "chromadb>=1.5.9",
+    "deepteam>=1.0.9",
+    "langchain>=1.4.1",
+    "langchain-chroma>=1.1.0",
+    "langchain-community>=0.4.2",
+    "langchain-mcp-adapters>=0.3.2",
+    "langchain-openrouter>=0.2.8",
+    "langchain-tavily>=0.2.18",
+    "langchain-text-splitters>=1.1.2",
+    "mcp<2",
+    "python-dotenv>=1.2.3",
+]

@@ -1,0 +1,11 @@
+langchain
+langchain-openrouter
+langchain-community
+langchain-chroma
+langchain-text-splitters
+langchain-tavily
+chromadb
+python-dotenv
+deepteam
+mcp<2
+langchain-mcp-adapters

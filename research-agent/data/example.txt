@@ -1,0 +1,183 @@
+Research Agent Knowledge Base
+
+Introduction to Research Agents
+
+A research agent is an AI system that can decide which information sources to use in order to answer a question. Unlike a basic question-answering system, a research agent can use multiple tools, inspect their results, and decide whether additional information is required.
+
+A typical research agent contains a language model, a set of tools, and an execution loop. The language model is responsible for deciding what action should happen next. Tools provide capabilities such as searching a private knowledge base, searching the public web, querying an API, or performing calculations.
+
+The important distinction between a normal RAG application and an agentic RAG application is who decides when retrieval happens. In a conventional RAG pipeline, a query is automatically sent to a retriever before the language model generates an answer. In an agentic RAG system, the language model can decide whether retrieval is necessary and which retrieval tool should be used.
+
+Retrieval-Augmented Generation
+
+Retrieval-Augmented Generation, commonly called RAG, allows a language model to use information from an external knowledge source. The knowledge source may contain company documents, technical documentation, research papers, product information, or other private data.
+
+A typical RAG pipeline contains several stages. First, documents are loaded from a source. The documents are then divided into smaller chunks. Each chunk is converted into a numerical vector using an embedding model. These vectors are stored in a vector database. When a user asks a question, the question is also converted into a vector. The vector database then searches for chunks that are semantically similar to the query.
+
+The retrieved chunks are passed to the language model as context. The model uses this context to generate an answer.
+
+RAG is useful because a language model does not need to contain every piece of information inside its model parameters. External information can be updated without retraining the language model.
+
+Document Chunking
+
+Chunking is an important part of a RAG system. Large documents are usually divided into smaller sections before embedding. A chunk should contain enough information to represent a meaningful concept while remaining small enough for efficient retrieval.
+
+Chunk size is a tradeoff. Very small chunks can lose important context. Very large chunks can contain unrelated information and reduce retrieval precision.
+
+Overlap between chunks can help preserve information that appears near a chunk boundary. For example, if one chunk ends in the middle of an explanation and the next chunk starts with the conclusion, overlap can ensure that both chunks contain enough surrounding context.
+
+Embedding Models
+
+An embedding model converts text into a numerical vector. Texts with similar meanings should have vectors that are relatively close to each other in the embedding space.
+
+BGE-M3 is an embedding model developed by BAAI. It can be used for multilingual semantic retrieval and long-document retrieval.
+
+The research agent uses the BGE-M3 model through OpenRouter. The model identifier is baai/bge-m3.
+
+BGE-M3 produces 1024-dimensional dense embeddings. These vectors are stored in the Chroma vector database.
+
+The embedding model should remain consistent between document ingestion and querying. Documents indexed with one embedding model should be queried using a compatible embedding model. Changing the embedding model can change the vector space and may require rebuilding the vector database.
+
+Vector Databases
+
+A vector database stores embeddings together with their associated text and metadata.
+
+Chroma is the vector database used by this research agent.
+
+When documents are indexed, each document chunk receives an embedding. The vector and the original text are stored together. Metadata can also be stored with the chunk.
+
+Useful metadata includes the source filename, document identifier, section name, URL, document type, or creation date.
+
+During retrieval, a query is converted into an embedding and compared with stored vectors. The vector database returns chunks that are semantically similar to the query.
+
+Metadata is important because it allows the application to identify where retrieved information originated.
+
+Agentic Retrieval
+
+An agentic retrieval system gives the language model a retrieval function as a tool. The model decides when the tool should be called.
+
+For example, a user may ask:
+
+"What does our internal documentation say about short-term memory?"
+
+The agent should use the internal retrieval tool because the answer is expected to exist inside the knowledge base.
+
+A different question might be:
+
+"What are the latest developments in AI agent frameworks?"
+
+The agent should use web search because the information is likely to change over time.
+
+A third question might require both sources:
+
+"Compare our internal research-agent architecture with the latest LangChain architecture."
+
+The agent may retrieve internal documentation and then search the web for current LangChain information.
+
+The agent should not assume that every question requires a web search.
+
+Web Search
+
+Web search provides access to information outside the private knowledge base. It is especially useful for current events, recent software releases, current documentation, changing product information, and information that was not included during the original document-ingestion process.
+
+Web search introduces a different reliability problem from private-document retrieval.
+
+Search results may contain outdated information, duplicated content, low-quality sources, or unsupported claims.
+
+A research agent should therefore prefer authoritative sources when possible.
+
+For technical questions, official documentation and primary sources are generally preferable to random summaries.
+
+Internal Knowledge Base Versus Web Search
+
+An internal knowledge base is useful when the answer depends on private or organization-specific information.
+
+Web search is useful when the answer depends on current external information.
+
+These two sources should not automatically be treated as equivalent.
+
+For example, an internal company document may describe how a particular system was designed. A web page may describe how a public framework currently works.
+
+If the two sources disagree, the agent should explain the difference rather than silently selecting one source.
+
+Research Quality
+
+A research agent should distinguish between retrieved evidence and its own reasoning.
+
+Retrieved documents provide evidence, while the language model interprets that evidence and constructs an answer.
+
+The agent should not invent information that does not appear in the available sources.
+
+When evidence is insufficient, the agent should state that additional information is required.
+
+When multiple sources disagree, the disagreement should be made explicit.
+
+Source attribution is important in research systems.
+
+A retrieved document should retain metadata identifying its origin so that the application can inspect why a particular piece of information was used.
+
+Evaluation of Research Agents
+
+A research agent should be evaluated on more than the quality of its final answer.
+
+Useful evaluation dimensions include:
+
+1. Tool selection.
+
+Did the agent select the correct tool?
+
+2. Retrieval quality.
+
+Did the retriever return relevant chunks?
+
+3. Evidence usage.
+
+Did the agent actually use the retrieved evidence?
+
+4. Web search necessity.
+
+Did the agent use web search when current information was required?
+
+5. Groundedness.
+
+Are factual claims supported by available evidence?
+
+6. Hallucination.
+
+Did the agent introduce unsupported information?
+
+7. Trajectory quality.
+
+Did the sequence of tool calls make sense?
+
+For example, an agent might produce a correct final answer by accident even though it selected the wrong tool.
+
+Looking only at the final answer would hide this failure.
+
+Trajectory-based evaluation can inspect the sequence of actions taken by the agent.
+
+A useful research-agent trace can contain the original user question, model tool selection, retrieval query, retrieved documents, web search query, search results, final model response, and sources used to support the response.
+
+Example Research Questions
+
+What is retrieval augmented generation?
+
+Why is chunk overlap useful in a RAG pipeline?
+
+What embedding model is being used in this research agent?
+
+Why should the embedding model remain consistent between indexing and querying?
+
+What is the difference between conventional RAG and agentic RAG?
+
+What is the role of Chroma in this system?
+
+When should an agent use internal retrieval?
+
+When should an agent use web search?
+
+What are the latest developments in LangChain's agent framework?
+
+Compare the internal research-agent architecture with the latest LangChain architecture.
+
+How should a research agent handle disagreement between internal documents and web sources?
