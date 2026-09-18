@@ -1,6 +1,7 @@
 import os
 import sys
 import asyncio
+import subprocess
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import config
 
@@ -9,15 +10,15 @@ from dotenv import load_dotenv
 
 from langchain.agents import create_agent
 from langchain.tools import tool, ToolRuntime
-from langchain_openrouter import ChatOpenRouter
 from langchain_openai import OpenAIEmbeddings
 from langchain_chroma import Chroma
-from langchain_tavily import TavilySearch
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langchain_core.runnables import RunnableConfig
 
 from dataclasses import dataclass
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
+from langgraph.types import interrupt, Command
 
 # ---------------------------------------------------------
 # Environment
@@ -26,13 +27,9 @@ from langgraph.store.memory import InMemoryStore
 load_dotenv()
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY")
 
 if not OPENROUTER_API_KEY:
     raise RuntimeError("OPENROUTER_API_KEY is not set.")
-
-if not TAVILY_API_KEY:
-    raise RuntimeError("TAVILY_API_KEY is not set.")
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_DIR = BASE_DIR / "chroma_db"
@@ -43,8 +40,12 @@ DB_DIR = BASE_DIR / "chroma_db"
 
 model = config.get_agent_model()
 
+# short-term (per-thread) memory
+checkpointer = InMemorySaver()
+
 # ---------------------------------------------------------
-# 2. BGE-M3 embeddings
+# 2. Runbook/knowledge-base RAG tool
+#    (docs ingested by ingest.py into chroma_db/)
 # ---------------------------------------------------------
 
 
@@ -67,37 +68,26 @@ embeddings = OpenRouterEmbeddings(
     model=config.embedding_model,
 )
 
-# ---------------------------------------------------------
-# 3. Chroma vector database
-# ---------------------------------------------------------
-
 vectorstore = Chroma(
     collection_name="research_docs",
     persist_directory=str(DB_DIR),
     embedding_function=embeddings,
 )
 
-# short memory
-checkpointer = InMemorySaver()
-
-# ---------------------------------------------------------
-# 4. Retriever
-# ---------------------------------------------------------
-
 retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-
-# ---------------------------------------------------------
-# 5. RAG tool
-# ---------------------------------------------------------
 
 
 @tool
 def retrieve_documents(query: str) -> str:
     """
-    Search the internal research knowledge base.
+    Search the internal runbook/knowledge-base collection (populated
+    by ingest.py) - postmortems, runbooks, architecture docs, past
+    incident write-ups.
 
-    Use this tool when the question may be answered using
-    information contained in the internal documents.
+    Use this tool when the question may be answered by internal
+    documentation, e.g. "how have we fixed this before", "what's the
+    runbook for this service", "what changed in the last incident on
+    this component".
     """
 
     documents = retriever.invoke(query)
@@ -125,34 +115,111 @@ CONTENT:
 
 
 # ---------------------------------------------------------
-# 6. Web search
+# 2b. Shell access tool
 # ---------------------------------------------------------
 
-web_search = TavilySearch(max_results=5)
+# Commands that are always refused, regardless of the agent's own
+# reasoning. Extend this to match your environment's real risk
+# surface - this list is a minimum, not a substitute for running the
+# agent as a low-privilege user in a sandboxed/limited-blast-radius
+# environment.
+DENY_SUBSTRINGS = ("rm -rf /", "mkfs", ":(){:|:&};:", "> /dev/sda", "dd if=")
+
+SHELL_TIMEOUT_SECONDS = 30
 
 
 @tool
-def search_web(query: str) -> str:
+def run_shell_command(command: str) -> str:
     """
-    Search the public web.
+    Execute a shell command on the host the agent runs on and return
+    its exit code, stdout, and stderr.
 
-    Use this tool for current, recent, external, or
-    time-sensitive information that may not exist in
-    the internal knowledge base.
+    Use this for diagnostics, restarts, log inspection, and other
+    operational actions that need a real command - e.g.
+    "systemctl status api", "kubectl get pods -n prod", "df -h",
+    "tail -n 200 /var/log/app.log".
+
+    This gives the agent whatever privileges the agent process
+    itself has - treat it as a terminal, not a safe sandbox on its
+    own. Do not run this process as root, and do not point it at
+    production without a least-privilege user and the deny-list
+    below reviewed for your environment.
     """
+    lowered = command.lower()
+    for pattern in DENY_SUBSTRINGS:
+        if pattern in lowered:
+            return f"Refused: command matches a blocked pattern ({pattern!r})."
 
-    result = web_search.invoke({"query": query})
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=SHELL_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return f"Command timed out after {SHELL_TIMEOUT_SECONDS}s."
+    except Exception as e:
+        return f"Failed to execute command: {e!r}"
 
-    return str(result)
+    output = f"EXIT CODE: {result.returncode}\n"
+    if result.stdout:
+        output += f"STDOUT:\n{result.stdout}\n"
+    if result.stderr:
+        output += f"STDERR:\n{result.stderr}\n"
+    return output
+
 
 # ---------------------------------------------------------
-# 7. MCP utility tools (word_count, format_citation) — served
-#    by mcp_server.py, nothing to do with retrieval.
+# 2c. Human-in-the-loop: discretionary ask tool (Type 2 gate)
+#
+# This is deliberately NOT a deterministic block on any command.
+# Nothing else in this file stops run_shell_command, update_ticket,
+# etc. from executing - whether the agent asks a human first is
+# entirely up to the agent's own judgment, per the system prompt.
+# ask_human pauses the graph (via LangGraph interrupt/resume, backed
+# by `checkpointer`) and waits for a real human reply before the
+# agent's run continues.
 # ---------------------------------------------------------
+
+
+@tool
+def ask_human(question: str, context: str = "") -> str:
+    """
+    Ask a human operator a question and wait for their reply before
+    proceeding. This pauses your run until a human responds.
+
+    Call this when you are about to do something destructive or hard
+    to reverse, when a runbook doesn't clearly cover the situation
+    you're seeing, or when you are otherwise not confident enough to
+    act alone. No other tool will stop you from acting without
+    asking - choosing to call this tool, and when, is part of your
+    job, not a formality.
+
+    Args:
+        question: The specific yes/no or open question you want the human to answer.
+        context: What you're about to do and why, so the human has enough to decide.
+    """
+    response = interrupt(
+        {
+            "type": "human_approval_request",
+            "question": question,
+            "context": context,
+        }
+    )
+    return str(response)
+
+
+# ---------------------------------------------------------
+# 3. MCP tools (tickets, monitoring, escalation) - served
+#    by mcp_server.py
+# ---------------------------------------------------------
+
 
 mcp_client = MultiServerMCPClient(
     {
-        "utils": {
+        "devops_utils": {
             "transport": "stdio",
             "command": sys.executable,
             "args": [str(BASE_DIR / "mcp_server.py")],
@@ -162,7 +229,7 @@ mcp_client = MultiServerMCPClient(
 
 mcp_tools = asyncio.run(mcp_client.get_tools())
 
-# long memory
+# long-term (cross-session) memory
 store = InMemoryStore()
 
 
@@ -174,47 +241,45 @@ class Context:
 @tool
 def remember_fact(fact: str, runtime: ToolRuntime[Context]) -> str:
     """
-    Save a fact about the user or their preferences for future
-    conversations (e.g. "prefers concise answers", "researching RAG systems").
+    Save an operational fact for future turns - e.g. "prod DB
+    migration scheduled for Friday 10pm", "on-call this week is
+    payments team", "known issue: staging redis flaps every deploy".
     """
     if runtime.store is None:
         return "Memory store is not available."
     key = str(hash(fact))[:8]
-    runtime.store.put(("user_facts", runtime.context.user_id), key, {"fact": fact})
+    runtime.store.put(("ops_facts", runtime.context.user_id), key, {"fact": fact})
     return "Saved."
 
 
 @tool
 def recall_facts(runtime: ToolRuntime[Context]) -> str:
-    """Retrieve previously saved facts about the user."""
+    """Retrieve previously saved operational facts/context."""
     if runtime.store is None:
         return "Memory store is not available."
-    items = runtime.store.search(("user_facts", runtime.context.user_id))
+    items = runtime.store.search(("ops_facts", runtime.context.user_id))
     if not items:
-        return "No saved facts about this user yet."
+        return "No saved facts yet."
     return "\n".join(item.value["fact"] for item in items)
 
 
 # ---------------------------------------------------------
-# 8. Agent system prompt
+# 4. Agent system prompt
 # ---------------------------------------------------------
 
-#   prompt1.txt -- original prompt (no explicit planning step)
-#   prompt2.txt -- current prompt (adds a "state your plan" instruction)
-
 PROMPT_PATH = BASE_DIR / "prompt1.txt"
-
 SYSTEM_PROMPT = PROMPT_PATH.read_text(encoding="utf-8")
 
 # ---------------------------------------------------------
-# 9. Create agent
+# 5. Create agent
 # ---------------------------------------------------------
 
 agent = create_agent(
     model=model,
     tools=[
         retrieve_documents,
-        search_web,
+        run_shell_command,
+        ask_human,
         *mcp_tools,
         remember_fact,
         recall_facts,
@@ -227,8 +292,10 @@ agent = create_agent(
 
 
 # ---------------------------------------------------------
-# 9b. Traced invocation helper (for DeepEval agentic metrics)
+# 5b. Traced invocation helper (kept for eval-suite hookups,
+#     e.g. DeepEval's LangChain callback handler)
 # ---------------------------------------------------------
+
 
 def invoke_with_tracing(question: str, thread_id: str = "default", user_id: str = "default", agent_instance=None):
     from deepeval.integrations.langchain import CallbackHandler
@@ -246,19 +313,20 @@ def invoke_with_tracing(question: str, thread_id: str = "default", user_id: str 
 
 
 # ---------------------------------------------------------
-# 10. Run agent
+# 6. Run agent
 # ---------------------------------------------------------
 
 
 def main():
 
     print("=" * 70)
-    print("RESEARCH AGENT")
+    print("DEVOPS AI AGENT")
     print("=" * 70)
 
     print("\nAvailable tools:")
     print("  - retrieve_documents")
-    print("  - search_web")
+    print("  - run_shell_command")
+    print("  - ask_human")
     for t in mcp_tools:
         print(f"  - {t.name} (MCP)")
     print("  - remember_fact")
@@ -267,7 +335,7 @@ def main():
     while True:
         print("\n" + "-" * 70)
 
-        question = input("Research question: ").strip()
+        question = input("DevOps task: ").strip()
 
         if not question:
             continue
@@ -276,14 +344,34 @@ def main():
             print("\nExiting.")
             break
 
-        print("\nAgent is researching...\n")
+        print("\nAgent is working...\n")
 
         try:
+            run_config: RunnableConfig = {"configurable": {"thread_id": "cli-session"}}
+
             result = agent.invoke(
                 {"messages": [{"role": "user", "content": question}]},
-                config={"configurable": {"thread_id": "cli-session"}},
+                config=run_config,
                 context=Context(user_id="cli-user"),
             )
+
+            while "__interrupt__" in result:
+                payload = result["__interrupt__"][0].value
+
+                print("\n" + "!" * 70)
+                print("HUMAN APPROVAL REQUESTED")
+                print("!" * 70)
+                print(f"Question: {payload.get('question')}")
+                if payload.get("context"):
+                    print(f"Context : {payload.get('context')}")
+
+                human_reply = input("\nYour reply: ").strip()
+
+                result = agent.invoke(
+                    Command(resume=human_reply),
+                    config=run_config,
+                    context=Context(user_id="cli-user"),
+                )
 
             print("=" * 70)
             print("ANSWER")

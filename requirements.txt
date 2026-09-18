@@ -3,7 +3,7 @@ langchain-openrouter
 langchain-community
 langchain-chroma
 langchain-text-splitters
-langchain-tavily
+langchain-openai
 chromadb
 python-dotenv
 deepteam
